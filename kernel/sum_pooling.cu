@@ -48,16 +48,20 @@ void GenEmbedding(const int embedding_len, const int emb_cnt, std::vector<float>
 
 void PrintEmbedding(const std::vector<float> & emb, const int embedding_len, const int emb_cnt) {
   for (int i = 0; i < emb_cnt; i++) {
-    cout << "idx " << i << ": ";
+    cout << "idx " << i << ": [";
     for (int j = 0; j < embedding_len; j++) {
-      cout << emb[i * embedding_len + j] << ',';
+      cout << emb[i * embedding_len + j];
+      if (j != embedding_len - 1) {
+        cout << ", ";
+      }
     }
-    cout << endl;
+    cout << "]" << endl;
   }
 }
 
 // Output index, batch index pair.
 using IndexPair = std::pair<uint16_t, uint16_t>;
+// using IndexPair = std::pair<int32_t, int32_t>;
 bool CalculateIndex(const std::vector<Offset>& offset, std::vector<IndexPair>* index) {
   if (index == nullptr) {
     return false;
@@ -76,12 +80,22 @@ bool CalculateIndex(const std::vector<Offset>& offset, std::vector<IndexPair>* i
   return true;
 }
 
+void PrintIndex(const std::vector<IndexPair>& index) {
+  for (int i = 0; i < index.size(); i++) {
+    cout << "idx " << i << ": " << index[i].first << ", " << index[i].second << endl;
+  }
+}
+
 __global__ void SumPoolingByBatch(
-    const int embedding_len, const IndexPair* index, const float* input, float** output) {
+    const int embedding_len, const int embedding_cnt, const IndexPair* index, const float* input, float** output) {
   const int32_t emb_idx = blockIdx.x * kEmbPerBlock + threadIdx.y;
-  const size_t start_offset = emb_idx * embedding_len;
-  const IndexPair info = index[emb_idx];
-  atomicAdd(&output[info.first][info.second * embedding_len + threadIdx.x], input[start_offset + threadIdx.x]);
+  if (emb_idx >= embedding_cnt) {
+    return;
+  }
+  const IndexPair* info = &(index[emb_idx]);
+  const size_t emb_offset = emb_idx * embedding_len;
+  // printf("%d, %d, %d\n", info->first, info->second, emb_idx);
+  atomicAdd(&output[info->first][info->second * embedding_len + threadIdx.x], input[emb_offset + threadIdx.x]);
 }
 
 __global__ void TestLane() {
@@ -99,6 +113,7 @@ int main() {
   for (int i = 0; i < feature_cnt; i++) {
     for (int j = 0; j < batch_cnt; j++) {
       int item_cnt = rand() % 4 + 1;
+      // int item_cnt = 1;
       auto& last = offset.emplace_back();
       last.num = item_cnt;
       last.start = total_cnt;
@@ -111,10 +126,11 @@ int main() {
   int block_cnt = (total_cnt + kEmbPerBlock - 1) / kEmbPerBlock;
   std::vector<IndexPair> index(total_cnt);
   CalculateIndex(offset, &index);
+  // PrintIndex(index);
 
   IndexPair* d_index;
   cudaMalloc(&d_index, total_cnt * sizeof(IndexPair));
-  cudaMemcpy(&d_index, index.data(), index.size() * sizeof(IndexPair),
+  cudaMemcpy(d_index, index.data(), total_cnt * sizeof(IndexPair),
              cudaMemcpyHostToDevice);
   // Allocate two dimension array.
   float** d_output;
@@ -122,10 +138,13 @@ int main() {
   cudaMalloc(&d_output, feature_cnt * sizeof(float*));
   for (int i = 0; i < feature_cnt; i++) {
     cudaMalloc(&d_help[i], embedding_len * batch_cnt * sizeof(float));
-    cudaMemset(&d_help[i], 0, embedding_len * batch_cnt * sizeof(float));
+    cudaMemset(d_help[i], 0, embedding_len * batch_cnt * sizeof(float));
   }
   cudaMemcpy(d_output, d_help.data(), feature_cnt * sizeof(float*), cudaMemcpyHostToDevice);
   cout << "total count: " << total_cnt
+       << ", block count: " << block_cnt
+       << ", sizeof index: " << sizeof(IndexPair)
+       << ", embedding length: " << embedding_len
        << ", index count: " << index.size() << endl;
   std::vector<float> emb;
   GenEmbedding(embedding_len, total_cnt, &emb);
@@ -135,7 +154,8 @@ int main() {
   cudaMemcpy(d_input, emb.data(), emb.size() * sizeof(float), cudaMemcpyHostToDevice);
 
   dim3 threads(embedding_len, kEmbPerBlock);
-  SumPoolingByBatch<<<block_cnt, threads>>>(embedding_len, d_index, d_input, d_output);
+  SumPoolingByBatch<<<block_cnt, threads>>>(embedding_len, total_cnt, d_index, d_input, d_output);
+  cudaDeviceSynchronize();
   std::vector<float> o_val(embedding_len * batch_cnt * sizeof(float));
   for (int i =0; i < feature_cnt; i++) {
     cudaMemcpy(o_val.data(), d_help[i],
@@ -144,6 +164,5 @@ int main() {
   }
   // dim3 threads(8, 4);
   // TestLane<<<1, threads>>>();
-  cudaDeviceSynchronize();
   return 0;
 }
