@@ -116,12 +116,15 @@ int main() {
   cudaMalloc(&d_index, total_cnt * sizeof(IndexPair));
   cudaMemcpy(&d_index, index.data(), index.size() * sizeof(IndexPair),
              cudaMemcpyHostToDevice);
+  // Allocate two dimension array.
   float** d_output;
+  std::vector<float*> d_help(feature_cnt);
   cudaMalloc(&d_output, feature_cnt * sizeof(float*));
   for (int i = 0; i < feature_cnt; i++) {
-    cudaMalloc(&d_output[i], embedding_len * batch_cnt);
-    cudaMemset(&d_output[i], 0, embedding_len * batch_cnt);
+    cudaMalloc(&d_help[i], embedding_len * batch_cnt * sizeof(float));
+    cudaMemset(&d_help[i], 0, embedding_len * batch_cnt * sizeof(float));
   }
+  cudaMemcpy(d_output, d_help.data(), feature_cnt * sizeof(float*), cudaMemcpyHostToDevice);
   cout << "total count: " << total_cnt
        << ", index count: " << index.size() << endl;
   std::vector<float> emb;
@@ -132,7 +135,13 @@ int main() {
   cudaMemcpy(d_input, emb.data(), emb.size() * sizeof(float), cudaMemcpyHostToDevice);
 
   dim3 threads(embedding_len, kEmbPerBlock);
-  // SumPoolingByBatch<<<block_cnt, threads>>>(embedding_len, d_index, d_input, d_output);
+  SumPoolingByBatch<<<block_cnt, threads>>>(embedding_len, d_index, d_input, d_output);
+  std::vector<float> o_val(embedding_len * batch_cnt * sizeof(float));
+  for (int i =0; i < feature_cnt; i++) {
+    cudaMemcpy(o_val.data(), d_help[i],
+      embedding_len * batch_cnt * sizeof(float), cudaMemcpyDeviceToHost);
+    PrintEmbedding(o_val, embedding_len, batch_cnt);
+  }
   // dim3 threads(8, 4);
   // TestLane<<<1, threads>>>();
   cudaDeviceSynchronize();
